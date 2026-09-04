@@ -1,0 +1,13 @@
+# Read file contained 200k product ID and return list cleaned ID
+def load_product_ids(filepath) -> list[str]:
+    ...
+
+# Convert html in description to text
+def clean_description(raw_html):
+    ...
+
+def parse_product_data(raw_json):
+    ...
+
+def save_json(data, output_path):
+    ...
