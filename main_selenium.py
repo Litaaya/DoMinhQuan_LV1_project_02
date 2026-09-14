@@ -18,6 +18,10 @@ API_URL = "https://api.tiki.vn/product-detail/api/v1/products/{}"
 INPUT_FILE = "product_ids.txt"
 OUTPUT_DIR = "output_data"
 
+CHECKPOINT_FILE = os.path.join(OUTPUT_DIR, "checkpoint.json")
+FAILED_FILE = os.path.join(OUTPUT_DIR, "failed_products.json")
+FAILED_SUMMARY_FILE = os.path.join(OUTPUT_DIR, "failed_summary.json")
+
 TEST_LIMIT = 200000
 BATCH_SIZE = 1000
 
@@ -25,50 +29,73 @@ BATCH_SIZE = 1000
 def create_driver():
     options = Options()
     options.add_argument("--start-maximized")
-
     return webdriver.Chrome(options=options)
 
 
 def save_batch(products, batch_number):
     output_path = os.path.join(OUTPUT_DIR, f"products_batch_{batch_number:03d}.json")
-
     save_json(products, output_path)
+    print(f"Saved batch {batch_number}: {len(products)} products -> {output_path}")
 
-    print(
-        f"Saved batch {batch_number}: "
-        f"{len(products)} products -> {output_path}"
+
+def load_json_file(file_path, default):
+    if not os.path.exists(file_path):
+        return default
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return default
+
+
+def load_checkpoint():
+    checkpoint = load_json_file(CHECKPOINT_FILE, {"completed_batches": []})
+    return set(checkpoint.get("completed_batches", []))
+
+
+def save_checkpoint(completed_batches):
+    save_json(
+        {"completed_batches": sorted(completed_batches)},
+        CHECKPOINT_FILE
     )
 
+
 def save_failed_products(failed_products):
-    failed_path = os.path.join(OUTPUT_DIR, "failed_products.json")
-    save_json(failed_products, failed_path)
+    save_json(failed_products, FAILED_FILE)
+
 
 def save_failed_summary(failed_summary):
-    summary_path = os.path.join(OUTPUT_DIR, "failed_summary.json")
-    save_json(failed_summary, summary_path)
+    save_json(failed_summary, FAILED_SUMMARY_FILE)
+
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     product_ids = load_product_ids(INPUT_FILE)[:TEST_LIMIT]
-
     print(f"Total ids: {len(product_ids)}")
+
+    completed_batches = load_checkpoint()
+    all_failed_products = load_json_file(FAILED_FILE, [])
+
+    failed_summary = load_json_file(
+        FAILED_SUMMARY_FILE,
+        {
+            "HTTP 404 - Product not found": 0,
+            "Response is not valid JSON": 0,
+            "Missing product id": 0,
+            "Missing product name": 0,
+            "Selenium/network exception": 0
+        }
+    )
+
+    if completed_batches:
+        print(f"Resume detected. Completed batches: {len(completed_batches)}")
 
     driver = create_driver()
 
-    all_failed_products = []
-
     total_success = 0
     total_failed = 0
-
-    failed_summary = {
-        "HTTP 404 - Product not found": 0,
-        "Response is not valid JSON": 0,
-        "Missing product id": 0,
-        "Missing product name": 0,
-        "Selenium/network exception": 0
-    }
-
     start_time = time.time()
 
     try:
@@ -76,28 +103,26 @@ def main():
         for batch_start in range(0, len(product_ids), BATCH_SIZE):
             batch_number = (batch_start // BATCH_SIZE) + 1
 
+            # Resume
+            if batch_number in completed_batches:
+                print(f"Batch {batch_number} already completed -> SKIP")
+                continue
+
             batch_ids = product_ids[batch_start:batch_start + BATCH_SIZE]
 
-            print(
-                f"\n===== BATCH {batch_number} ====="
-            )
-
-            print(
-                f"IDs in batch: {len(batch_ids)}"
-            )
+            print(f"\n===== BATCH {batch_number} =====")
+            print(f"IDs in batch: {len(batch_ids)}")
 
             batch_products = []
             batch_failed = []
 
             # Process products
             for index, product_id in enumerate(batch_ids, start=1):
-                global_index = (batch_start + index)
-
+                global_index = batch_start + index
                 url = API_URL.format(product_id)
 
                 try:
                     driver.get(url)
-
                     body = driver.find_element(By.TAG_NAME, "body").text.strip()
 
                     # Parse JSON
@@ -105,7 +130,7 @@ def main():
                         raw_data = json.loads(body)
 
                     except json.JSONDecodeError:
-                        reason = ("Response is not valid JSON")
+                        reason = "Response is not valid JSON"
 
                         batch_failed.append({
                             "product_id": product_id,
@@ -114,20 +139,14 @@ def main():
                         })
 
                         total_failed += 1
-
                         failed_summary["Response is not valid JSON"] += 1
 
-                        print(
-                            f"[{global_index}/"
-                            f"{len(product_ids)}] "
-                            f"{product_id} "
-                            f"-> FAILED | {reason}"
-                        )
+                        print(f"[{global_index}/{len(product_ids)}] {product_id} -> FAILED | {reason}")
                         continue
 
                     # API 404
                     if raw_data.get("status") == 404:
-                        reason = ("HTTP 404 - Product not found")
+                        reason = "HTTP 404 - Product not found"
 
                         batch_failed.append({
                             "product_id": product_id,
@@ -136,23 +155,20 @@ def main():
                         })
 
                         total_failed += 1
-
                         failed_summary["HTTP 404 - Product not found"] += 1
 
-                        print(
-                            f"[{global_index}/"
-                            f"{len(product_ids)}] "
-                            f"{product_id} "
-                            f"-> FAILED | {reason}"
-                        )
+                        print(f"[{global_index}/{len(product_ids)}] {product_id} -> FAILED | {reason}")
                         continue
 
                     # Parse required fields
                     product = parse_product_data(raw_data)
 
+                    # Keep requested ID for later validation
+                    product["requested_id"] = product_id
+
                     # Missing product ID
                     if not product.get("id"):
-                        reason = ("Missing product id")
+                        reason = "Missing product id"
 
                         batch_failed.append({
                             "product_id": product_id,
@@ -160,20 +176,14 @@ def main():
                         })
 
                         total_failed += 1
-
                         failed_summary["Missing product id"] += 1
 
-                        print(
-                            f"[{global_index}/"
-                            f"{len(product_ids)}] "
-                            f"{product_id} "
-                            f"-> FAILED | {reason}"
-                        )
+                        print(f"[{global_index}/{len(product_ids)}] {product_id} -> FAILED | {reason}")
                         continue
 
                     # Missing product name
                     if not product.get("name"):
-                        reason = ("Missing product name")
+                        reason = "Missing product name"
 
                         batch_failed.append({
                             "product_id": product_id,
@@ -181,33 +191,19 @@ def main():
                         })
 
                         total_failed += 1
-
                         failed_summary["Missing product name"] += 1
 
-                        print(
-                            f"[{global_index}/"
-                            f"{len(product_ids)}] "
-                            f"{product_id} "
-                            f"-> FAILED | {reason}"
-                        )
+                        print(f"[{global_index}/{len(product_ids)}] {product_id} -> FAILED | {reason}")
                         continue
 
                     # Success
                     batch_products.append(product)
-
                     total_success += 1
 
-                    print(
-                        f"[{global_index}/"
-                        f"{len(product_ids)}] "
-                        f"{product_id} -> OK"
-                    )
+                    print(f"[{global_index}/{len(product_ids)}] {product_id} -> OK")
 
                 except Exception as e:
-                    reason = (
-                        f"Selenium/network exception: "
-                        f"{str(e)}"
-                    )
+                    reason = f"Selenium/network exception: {str(e)}"
 
                     batch_failed.append({
                         "product_id": product_id,
@@ -215,83 +211,43 @@ def main():
                     })
 
                     total_failed += 1
-
                     failed_summary["Selenium/network exception"] += 1
 
-                    print(
-                        f"[{global_index}/"
-                        f"{len(product_ids)}] "
-                        f"{product_id} "
-                        f"-> FAILED | {reason}"
-                    )
+                    print(f"[{global_index}/{len(product_ids)}] {product_id} -> FAILED | {reason}")
 
-            # Save successful batch
+            # Save batch
             save_batch(batch_products, batch_number)
 
-            # Append failed of batch
             all_failed_products.extend(batch_failed)
-
-            # Save failed immediately
             save_failed_products(all_failed_products)
-
-            # Save failed summary
             save_failed_summary(failed_summary)
 
-            print(
-                f"Batch {batch_number} completed"
-            )
+            # Only checkpoint after all batch data is saved
+            completed_batches.add(batch_number)
+            save_checkpoint(completed_batches)
 
-            print(
-                f"Success: "
-                f"{len(batch_products)}"
-            )
+            print(f"Batch {batch_number} completed")
+            print(f"Success: {len(batch_products)}")
+            print(f"Failed: {len(batch_failed)}")
 
-            print(
-                f"Failed: "
-                f"{len(batch_failed)}"
-            )
+    except KeyboardInterrupt:
+        print("\nCrawl cancelled by user.")
+        print("Current unfinished batch was not checkpointed.")
+        print("Run the script again to resume.")
 
     finally:
         driver.quit()
 
-    # Final statistics
     elapsed = time.time() - start_time
 
-    print("\n===== RESULT =====")
+    print("\n===== CURRENT RUN RESULT =====")
+    print(f"Successful products: {total_success}")
+    print(f"Failed products: {total_failed}")
+    print(f"Elapsed: {elapsed:.2f} seconds")
 
-    print(
-        f"Total: {len(product_ids)}"
-    )
-
-    print(
-        f"Successful products: "
-        f"{total_success}"
-    )
-
-    print(
-        f"Failed products: "
-        f"{total_failed}"
-    )
-
-    print(
-        f"Elapsed: "
-        f"{elapsed:.2f} seconds"
-    )
-
-    if product_ids:
-        print(
-            f"Average: "
-            f"{elapsed / len(product_ids):.3f} "
-            f"sec/product"
-        )
-
-    # Failed summary
     print("\n===== FAILED SUMMARY =====")
-
     for reason, count in failed_summary.items():
-        print(
-            f"{reason}: {count}"
-        )
+        print(f"{reason}: {count}")
 
 
 if __name__ == "__main__":
