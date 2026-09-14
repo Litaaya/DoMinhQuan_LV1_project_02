@@ -2,3 +2,4 @@ beautifulsoup4
 aiohttp
 playwright
 curl_cffi
+selenium
