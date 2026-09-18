@@ -15,8 +15,8 @@ import time
 
 API_URL = "https://api.tiki.vn/product-detail/api/v1/products/{}"
 
-INPUT_FILE = "product_ids.txt"
-OUTPUT_DIR = "output_data"
+INPUT_FILE = "../product_ids.txt"
+OUTPUT_DIR = "../output_data"
 
 CHECKPOINT_FILE = os.path.join(OUTPUT_DIR, "checkpoint.json")
 FAILED_FILE = os.path.join(OUTPUT_DIR, "failed_products.json")
