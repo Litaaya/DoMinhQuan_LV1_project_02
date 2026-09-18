@@ -3,3 +3,5 @@ aiohttp
 playwright
 curl_cffi
 selenium
+psycopg
+psycopg[binary]
