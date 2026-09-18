@@ -30,88 +30,132 @@ def create_database():
         "user": os.getenv("db_user"),
         "password": os.getenv("db_password"),
     }
+    try:
+        conn = psycopg.connect(**base_config, autocommit=True)
+    except psycopg.OperationalError as e:
+        print(f"Database connection failed: {e}")
+        raise
 
-    with psycopg.connect(**base_config, autocommit=True) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (os.getenv("db_name"),))
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (os.getenv("db_name"),))
 
-            if not cur.fetchone():
-                cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(os.getenv("db_name"))))
-                print("Database created")
-            else:
-                print("Database already exists")
+                if not cur.fetchone():
+                    cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(os.getenv("db_name"))))
+                    print("Database created")
+                else:
+                    print("Database already exists")
+    except psycopg.DatabaseError as e:
+        print(f"Database operation failed: {e}")
+        raise
 
 def create_table(conn):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS products (
-                id BIGINT PRIMARY KEY,
-                requested_id BIGINT,
-                name TEXT,
-                url_key TEXT,
-                price NUMERIC,
-                description TEXT,
-                images JSONB
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS products (
+                    id BIGINT PRIMARY KEY,
+                    requested_id BIGINT,
+                    name TEXT,
+                    url_key TEXT,
+                    price NUMERIC,
+                    description TEXT,
+                    images JSONB
+                )
+                """
             )
-            """
-        )
-    conn.commit()
+        conn.commit()
+    except psycopg.DatabaseError as e:
+        conn.rollback()
+        print(f"Create table failed: {e}")
+        raise
 
 def load_products(file_path):
-    with open(file_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    except FileNotFoundError as e:
+        print(f"File not found: {e}")
+        raise
+
+    except json.JSONDecodeError as e:
+        print(f"JSON decode error: {e}")
+        raise
 
 def insert_products(conn, products):
-    rows = [
-        (
-            product.get("id"),
-            product.get("requested_id"),
-            product.get("name"),
-            product.get("url_key"),
-            product.get("price"),
-            product.get("description"),
-            Jsonb(product.get("images", [])),
-        )
-        for product in products
-    ]
-
-    with conn.cursor() as cur:
-        cur.executemany(
-            """
-            INSERT INTO products (
-                id,
-                requested_id,
-                name,
-                url_key,
-                price,
-                description,
-                images
+    try:
+        rows = [
+            (
+                product.get("id"),
+                product.get("requested_id"),
+                product.get("name"),
+                product.get("url_key"),
+                product.get("price"),
+                product.get("description"),
+                Jsonb(product.get("images", [])),
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO NOTHING
-            """, rows
-        )
+            for product in products
+        ]
+    except Exception as e:
+        print(f"Prepare rows failed: {e}")
+        raise
 
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO products (
+                    id,
+                    requested_id,
+                    name,
+                    url_key,
+                    price,
+                    description,
+                    images
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+                """, rows
+            )
+
+        conn.commit()
+    except psycopg.DatabaseError as e:
+        conn.rollback()
+        print(f"Insert products failed: {e}")
+        raise
 
 def main():
     files = sorted(glob.glob(str(input_pattern)))
+    if not files:
+        raise FileNotFoundError("No input files found")
     print(f"Found {len(files)} files")
 
     create_database()
 
-    with psycopg.connect(**db_config) as conn:
-        create_table(conn)
+    try:
+        conn = psycopg.connect(**db_config)
+    except psycopg.OperationalError as e:
+        print(f"Database connection failed: {e}")
+        raise
 
-        total = 0
+    create_table(conn)
 
-        for index, file_path in enumerate(files, start=1):
+    total = 0
+
+    for index, file_path in enumerate(files, start=1):
+        try:
             products = load_products(file_path)
-            insert_products(conn, products)
+        except (FileNotFoundError, json.JSONDecodeError):
+            print(f"Skipped filed: {file_path}")
+            continue
 
-            total += len(products)
-            print(f"[{index}/{len(files)}] Loaded {len(products)} products | Total: {total}")
+        insert_products(conn, products)
+
+        total += len(products)
+        print(f"[{index}/{len(files)}] Loaded {len(products)} products | Total: {total}")
 
     print("Completed")
 
